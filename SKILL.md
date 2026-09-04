@@ -171,9 +171,9 @@ Com 5 personas e so 3 familias de modelo independentes disponiveis (o `Claude Op
 |---|---|
 | The Contrarian | `Gemini 3.1 Pro (High)` |
 | The First Principles Thinker | `Claude Sonnet 4.6 (Thinking)` |
-| The Expansionist | `Gemini 3.7 Flash (High)` |
+| The Expansionist | `Gemini 3.8 Flash (High)` |
 | The Outsider | `Gemini 3.1 Pro (High)` |
-| The Executor | `Gemini 3.7 Flash (High)` |
+| The Executor | `Gemini 3.8 Flash (High)` |
 
 
 > **Nunca use `GPT-OSS 120B`** — modelo desatualizado, fora de uso neste council (ver `call-agy/SKILL.md`, secao "Catalogo de modelos").
@@ -191,9 +191,9 @@ from agy import call_agy_parallel
 ADVISORS = [
     ("The Contrarian", contrarian_style, "Gemini 3.1 Pro (High)"),
     ("The First Principles Thinker", first_principles_style, "Claude Sonnet 4.6 (Thinking)"),
-    ("The Expansionist", expansionist_style, "Gemini 3.7 Flash (High)"),
+    ("The Expansionist", expansionist_style, "Gemini 3.8 Flash (High)"),
     ("The Outsider", outsider_style, "Gemini 3.1 Pro (High)"),
-    ("The Executor", executor_style, "Gemini 3.7 Flash (High)"),
+    ("The Executor", executor_style, "Gemini 3.8 Flash (High)"),
 ]
 jobs = [{"prompt": build_advisor_prompt(name, style, framed_question), "model": model}
         for name, style, model in ADVISORS]
