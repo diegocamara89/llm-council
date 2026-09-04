@@ -514,6 +514,8 @@ Only save a transcript if the user asks for it or if the question is significant
 
 - **Gemini sempre no tier `(High)`** no backend call-agy — `(Low)`/`(Medium)` sao so para probe/triagem, nunca para a opiniao de um conselheiro.
 
+- **Advisor falhou sem causa clara (`status: ERROR`/`TIMEOUT` no `CallResult`)?** Antes de descartar esse advisor ou cair pro fallback Claude, veja `call-agy/references/environment.md` — tem o caminho dos logs do `agy` (`~/.gemini/antigravity-cli/log/cli-*.log`) pra diagnosticar auth/rede/sandbox quando `status`/`error` sozinhos nao bastam.
+
 - **Always anonymize for peer review.** If reviewers know which advisor said what, they'll defer to certain thinking styles instead of evaluating on merit.
 
 - **The chairman can disagree with the majority.** If 4 out of 5 advisors say "do it" but the reasoning of the 1 dissenter is strongest, the chairman should side with the dissenter and explain why.
