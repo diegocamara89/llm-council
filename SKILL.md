@@ -17,7 +17,7 @@ You ask one AI a question, you get one answer. That answer might be great. It mi
 The council fixes this. It runs your question through 5 independent advisors, each thinking from a fundamentally different angle. Then they review each other's work. Then a chairman synthesizes everything into a final recommendation that tells you where the advisors agree, where they clash, and what you should actually do.
 
 
-This is adapted from Andrej Karpathy's LLM Council. He dispatches queries to multiple models, has them peer-review each other anonymously, then a chairman produces the final answer. We do the same thing inside Claude using sub-agents with different thinking lenses instead of different models.
+This is adapted from Andrej Karpathy's LLM Council. He dispatches queries to multiple models, has them peer-review each other anonymously, then a chairman produces the final answer. We do the same thing with real, different models called through `call-agy`, each also given a different thinking lens.
 
 
 ---
@@ -141,17 +141,15 @@ If the question is too vague ("council this: my business"), ask one clarifying q
 Save the framed question for the transcript.
 
 
-### step 2: convene the council (backend: call-agy quando disponivel)
+### step 2: convene the council (backend: call-agy, unico)
 
 
-**Escolha o backend antes de spawnar os advisors:**
+**Backend unico — modelos reais via `call-agy`.** Cada advisor e respondido por um MODELO REAL diferente via `call_agy_parallel` (`~/.claude/skills/call-agy/scripts/agy.py`) — nao por uma sub-persona do Claude conversando consigo mesma. Diversidade de opiniao de verdade, nao so de prompt sobre o mesmo modelo.
 
-- **Backend preferido — modelos reais via `call-agy`.** Se `~/.claude/skills/call-agy/scripts/agy.py` existir (ou o caminho equivalente no workspace), cada advisor e respondido por um MODELO REAL diferente via `call_agy_parallel` — nao por uma sub-persona do Claude conversando consigo mesma. Diversidade de opiniao de verdade, nao so de prompt sobre o mesmo modelo.
-
-- **Fallback — sub-agentes Claude.** Se `call-agy` nao estiver disponivel (skill ausente, `agy` fora do PATH, ou o usuario pedir "sem agy"), use o modo original: 5 sub-agentes Claude via Task/Agent tool, cada um com uma persona.
+**Nao ha fallback para sub-agentes Claude.** Se o `call-agy` nao estiver disponivel (skill ausente, `agy` fora do PATH, `AUTH_ERROR`, cota esgotada), pare e avise o usuario com o erro concreto, para ele trocar de conta ou corrigir o ambiente. Nunca rode o council com sub-agentes Claude: consome a cota do Claude Code, e quando ela esgota derruba o proprio agente que faria a sintese.
 
 
-Nos dois backends, cada advisor recebe:
+Cada advisor recebe:
 
 
 1. Their advisor identity and thinking style (from the descriptions above)
@@ -204,7 +202,7 @@ results = call_agy_parallel(jobs, max_concurrency=5, retries=2, timeout=180)
 Each advisor should produce a response of 150-300 words. Long enough to be substantive, short enough to be scannable.
 
 
-**Advisor prompt template (usado nos dois backends):**
+**Advisor prompt template:**
 
 
 ```
@@ -233,7 +231,7 @@ Keep your response between 150-300 words. No preamble. Go straight into your ana
 ```
 
 
-### step 3: peer review (5 sub-agents in parallel)
+### step 3: peer review (5 reviewers in parallel)
 
 
 This is the step that makes the council more than just "ask 5 times." It's the core of Karpathy's insight.
@@ -242,7 +240,7 @@ This is the step that makes the council more than just "ask 5 times." It's the c
 Collect all 5 advisor responses. Anonymize them as Response A through E (randomize which advisor maps to which letter so there's no positional bias).
 
 
-Spawn 5 new sub-agents, one for each advisor (via `call_agy_parallel` no backend call-agy, reaproveitando o mapeamento de modelo do step 2; via Task/Agent tool no fallback Claude). Each reviewer sees all 5 anonymized responses and answers three questions:
+Run 5 reviewers, one for each advisor, via `call_agy_parallel`, reaproveitando o mapeamento de modelo do step 2. Each reviewer sees all 5 anonymized responses and answers three questions:
 
 
 1. Which response is the strongest and why? (pick one)
@@ -316,7 +314,7 @@ Keep your review under 200 words. Be direct.
 This is the final step. One agent gets everything: the original question, all 5 advisor responses (now de-anonymized so you can see which advisor said what), and all 5 peer reviews.
 
 
-**Backend call-agy:** chame `call_agy` com `model="Claude Opus 4.6 (Thinking)"` (`SYNTH_MODEL`) — nunca reaproveite um modelo ja usado como advisor. **Fallback Claude:** sintetize via um sub-agente Claude dedicado (ou o proprio agente principal).
+Chame `call_agy` com `model="Claude Opus 4.6 (Thinking)"` (`SYNTH_MODEL`) — nunca reaproveite um modelo ja usado como advisor.
 
 
 The chairman's job is to produce the final council output. It follows this structure:
@@ -508,13 +506,13 @@ Only save a transcript if the user asks for it or if the question is significant
 
 - **Always spawn all 5 advisors in parallel.** Sequential spawning wastes time and lets earlier responses bleed into later ones.
 
-- **Prefira o backend `call-agy` (modelos reais) sempre que disponivel.** So caia pro backend Claude (personas) se a skill `call-agy` nao estiver instalada. Modelos reais divergem de verdade; personas sobre o mesmo modelo divergem menos.
+- **So o backend `call-agy` (modelos reais).** Sem `call-agy` funcionando, pare e avise o usuario; nunca substitua por sub-agentes Claude. Modelos reais divergem de verdade; personas sobre o mesmo modelo divergem menos.
 
 - **Nunca use `GPT-OSS 120B`** como advisor ou chairman — modelo desatualizado (ver `call-agy/SKILL.md`).
 
-- **Gemini sempre no tier `(High)`** no backend call-agy — `(Low)`/`(Medium)` sao so para probe/triagem, nunca para a opiniao de um conselheiro.
+- **Gemini sempre no tier `(High)`** — `(Low)`/`(Medium)` sao so para probe/triagem, nunca para a opiniao de um conselheiro.
 
-- **Advisor falhou sem causa clara (`status: ERROR`/`TIMEOUT` no `CallResult`)?** Antes de descartar esse advisor ou cair pro fallback Claude, veja `call-agy/references/environment.md` — tem o caminho dos logs do `agy` (`~/.gemini/antigravity-cli/log/cli-*.log`) pra diagnosticar auth/rede/sandbox quando `status`/`error` sozinhos nao bastam.
+- **Advisor falhou sem causa clara (`status: ERROR`/`TIMEOUT` no `CallResult`)?** Antes de descartar esse advisor, veja `call-agy/references/environment.md` — tem o caminho dos logs do `agy` (`~/.gemini/antigravity-cli/log/cli-*.log`) pra diagnosticar auth/rede/sandbox quando `status`/`error` sozinhos nao bastam.
 
 - **Always anonymize for peer review.** If reviewers know which advisor said what, they'll defer to certain thinking styles instead of evaluating on merit.
 
