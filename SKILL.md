@@ -74,7 +74,7 @@ O script usa pasta de trabalho vazia (`~/.agy-council-cwd`), sorteia as letras, 
 longos e trata a cota: **Gemini esgotado** -> as cadeiras e revisores Gemini passam ao Claude Sonnet
 do agy (com aviso de menos diversidade); **Claude tambem esgotado** -> para.
 
-Saida JSON: `status`, `veredito`, `respostas` (letra, lente, modelo, texto), `revisoes`,
+Saida JSON: `status`, `veredito`, `respostas` (letra, `papel` = lente, modelo, texto), `revisoes`,
 `chamadas`, `baldes`, `avisos`. Codigo 0 ok, 1 nao fechou, 2 entrada invalida, 3 cota.
 
 | status | O que fazer |
