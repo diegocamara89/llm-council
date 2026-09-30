@@ -1,523 +1,132 @@
 ---
-
 name: llm-council
+description: Roda uma decisao dificil por varios modelos de familias diferentes (Gemini e Claude, pelo agy), com revisao anonima e fechamento conferido pelo Claude. Use SO quando o usuario pedir explicitamente - "council", "llm-council", "roda o council", "passa pelo council", "quero varias opinioes sobre essa decisao". Nao use por iniciativa propria nem para fato, calculo, resumo, texto ou o que se resolve medindo.
+---
 
+# llm-council - varias opinioes independentes sobre uma decisao
 
-description: "Run any question, idea, or decision through a council of 5 AI advisors who independently analyze it, peer-review each other anonymously, and synthesize a final verdict. Based on Karpathy's LLM Council methodology. MANDATORY TRIGGERS: 'council this', 'run the council', 'war room this', 'pressure-test this', 'stress-test this', 'debate this'. STRONG TRIGGERS (use when combined with a real decision or tradeoff): 'should I X or Y', 'which option', 'what would you do', 'is this the right move', 'validate this', 'get multiple perspectives', 'I can't decide', 'I'm torn between'. Do NOT trigger on simple yes/no questions, factual lookups, or casual 'should I' without a meaningful tradeoff (e.g. 'should I use markdown' is not a council question). DO trigger when the user presents a genuine decision with stakes, multiple options, and context that suggests they want it pressure-tested from multiple angles."
+Uma decisao, analisada por modelos de **familias diferentes** (Gemini e Claude, pelo agy), cada um
+com uma lente; um modelo fecha a analise e o Claude **confere** antes de entregar. Metodo inspirado
+no LLM Council de Andrej Karpathy e na skill de Ole Lehmann; redacao propria.
+
+O motor e `scripts/council.py`, sobre a skill `call-agy`. Chame o script; nao remonte o fluxo na mao.
 
 ---
 
+## Quando vale
 
-# LLM Council
+Vale para decisao com opcoes reais e custo de errar: ferramenta ou arquitetura, construir ou nao,
+qual caminho priorizar, um plano antes de executar.
 
-
-You ask one AI a question, you get one answer. That answer might be great. It might be mid. You have no way to tell because you only saw one perspective.
-
-
-The council fixes this. It runs your question through 5 independent advisors, each thinking from a fundamentally different angle. Then they review each other's work. Then a chairman synthesizes everything into a final recommendation that tells you where the advisors agree, where they clash, and what you should actually do.
-
-
-This is adapted from Andrej Karpathy's LLM Council. He dispatches queries to multiple models, has them peer-review each other anonymously, then a chairman produces the final answer. We do the same thing with real, different models called through `call-agy`, each also given a different thinking lens.
-
+Nao vale quando a resposta e fato, calculo ou algo que um teste resolve (faca o teste), nem para
+pedido de resumo, texto ou codigo, nem para decisao facil de desfazer. Se o usuario disse que a cota
+do agy esta no fim, avise o custo antes.
 
 ---
 
+## Modos
 
-## when to run the council
+| Modo | Quando | Pedidos ao agy | Custo aproximado |
+|---|---|---|---|
+| **leve** (padrao) | a maioria das decisoes | 3 conselheiros + fechamento = 4 | ~160 mil tokens; 2 no balde Claude |
+| **completo** | o usuario pediu, ou a decisao e cara de desfazer | 5 + 3 revisores + fechamento = 9 | ~360 mil tokens; 3 no balde Claude |
+| **sigiloso** | a decisao envolve dado sigiloso (processo, investigacao, dado pessoal, extrato, credencial) | 3 subagentes do Claude | cota do Claude Code; nada vai ao agy |
 
+Antes de rodar, diga em uma linha: modo, pedidos e balde. Retentativas somam tempo (ate 4 por
+pedido, 300 s cada); o script mostra o progresso de cada fase.
 
-The council is for questions where being wrong is expensive.
+Lentes e modelos (definidos em `council.py`):
 
+| Lente | Pergunta que ela faz | Modelo | Leve | Completo |
+|---|---|---|---|---|
+| auditor | o que pode falhar, quanto custa, que premissa esta sem prova | Gemini 3.1 Pro (High) | sim | sim |
+| evidencia | que dado, medicao ou teste barato decidiria; o que esta sendo afirmado sem prova | Claude Sonnet 4.6 (Thinking) | sim | sim |
+| operador | o menor passo verificavel desta semana e o que ele provaria | Gemini 3.8 Flash (High) | sim | sim |
+| alternativa | o caminho fora das opcoes dadas que renderia mais com o mesmo esforco | Gemini 3.8 Flash (High) | - | sim |
+| estranho | o que soa estranho para quem chega agora; recebe so a pergunta | Gemini 3.1 Pro (High) | - | sim |
 
-Good council questions:
-
-- "Should I launch a $97 workshop or a $497 course?"
-
-- "Which of these 3 positioning angles is strongest?"
-
-- "I'm thinking of pivoting from X to Y. Am I crazy?"
-
-- "Here's my landing page copy. What's weak?"
-
-- "Should I hire a VA or build an automation first?"
-
-
-Bad council questions:
-
-- "What's the capital of France?" (one right answer, no need for perspectives)
-
-- "Write me a tweet" (creation task, not a decision)
-
-- "Summarize this article" (processing task, not judgment)
-
-
-The council shines when there's genuine uncertainty and the cost of a bad call is high. If you already know the answer and just want validation, the council will likely tell you things you don't want to hear. That's the point.
-
+Fechamento: `SYNTH_MODEL` da call-agy (Claude Opus 4.6 Thinking, via agy). Revisores do completo:
+um por modelo. Revisores veem so a decisao e os pareceres; o fechamento ve tambem o contexto. IDs
+conferidos em 2026-09-30, junto com a secao "Catalogo de modelos" da call-agy.
 
 ---
 
+## Passo 1 - sigilo e enquadramento
 
-## the five advisors
+1. **Sigilo primeiro.** Envolve dado sigiloso ou credencial -> **modo sigiloso**. Na duvida, sigiloso.
+2. **Nao** leia `memory/`, pastas de caso nem "arquivos de contexto" genericos para enriquecer a
+   pergunta. Use o que o usuario disse e os arquivos que ele citou, e escreva **voce** um resumo
+   curto; nunca cole conteudo bruto.
+3. **Confira os fatos do enunciado** antes de enviar: premissa falsa no enunciado ja produziu
+   opiniao unanime e errada. Nao inclua a sua hipotese nem resultado de rodada anterior.
+4. Decisao + resumo: ate **4 mil caracteres** (o script recusa acima).
+5. Havendo resumo de contexto, **mostre ao usuario o texto** antes de enviar.
 
+## Passo 2 - rodar (leve ou completo)
 
-Each advisor thinks from a different angle. They're not job titles or personas. They're thinking styles that naturally create tension with each other.
+Grave a decisao e o resumo em `.txt` na pasta temporaria da sessao e rode:
 
+```bash
+python ~/.claude/skills/llm-council/scripts/council.py --modo leve --pergunta decisao.txt --contexto resumo.txt
+```
 
-### 1. The Contrarian
+O script usa pasta de trabalho vazia (`~/.agy-council-cwd`), sorteia as letras, corta pareceres
+longos e trata a cota: **Gemini esgotado** -> as cadeiras e revisores Gemini passam ao Claude Sonnet
+do agy (com aviso de menos diversidade); **Claude tambem esgotado** -> para.
 
-Actively looks for what's wrong, what's missing, what will fail. Assumes the idea has a fatal flaw and tries to find it. If everything looks solid, digs deeper. The Contrarian is not a pessimist. They're the friend who saves you from a bad deal by asking the questions you're avoiding.
+Saida JSON: `status`, `veredito`, `respostas` (letra, lente, modelo, texto), `revisoes`,
+`chamadas`, `baldes`, `avisos`. Codigo 0 ok, 1 nao fechou, 2 entrada invalida, 3 cota.
 
-
-### 2. The First Principles Thinker
-
-Ignores the surface-level question and asks "what are we actually trying to solve here?" Strips away assumptions. Rebuilds the problem from the ground up. Sometimes the most valuable council output is the First Principles Thinker saying "you're asking the wrong question entirely."
-
-
-### 3. The Expansionist
-
-Looks for upside everyone else is missing. What could be bigger? What adjacent opportunity is hiding? What's being undervalued? The Expansionist doesn't care about risk (that's the Contrarian's job). They care about what happens if this works even better than expected.
-
-
-### 4. The Outsider
-
-Has zero context about you, your field, or your history. Responds purely to what's in front of them. This is the most underrated advisor. Experts develop blind spots. The Outsider catches the curse of knowledge: things that are obvious to you but confusing to everyone else.
-
-
-### 5. The Executor
-
-Only cares about one thing: can this actually be done, and what's the fastest path to doing it? Ignores theory, strategy, and big-picture thinking. The Executor looks at every idea through the lens of "OK but what do you do Monday morning?" If an idea sounds brilliant but has no clear first step, the Executor will say so.
-
-
-**Why these five:** They create three natural tensions. Contrarian vs Expansionist (downside vs upside). First Principles vs Executor (rethink everything vs just do it). The Outsider sits in the middle keeping everyone honest by seeing what fresh eyes see.
-
-
----
-
-
-## how a council session works
-
-
-### step 1: frame the question (with context enrichment)
-
-
-When the user says "council this" (or any trigger phrase), do two things before framing:
-
-
-**A. Scan the workspace for context.** The user's question is often just the tip of the iceberg. Their Claude setup likely contains files that would dramatically improve the council's output. Before framing, quickly scan for and read any relevant context files:
-
-
-- `CLAUDE.md` or `claude.md` in the project root or workspace (business context, preferences, constraints)
-
-- Any `memory/` folder (audience profiles, voice docs, business details, past decisions)
-
-- Any files the user explicitly referenced or attached
-
-- Recent council transcripts in this folder (to avoid re-counciling the same ground)
-
-- Any other context files that seem relevant to the specific question (e.g., if they're asking about pricing, look for revenue data, past launch results, audience research)
-
-
-Use `Glob` and quick `Read` calls to find these. Don't spend more than 30 seconds on this. You're looking for the 2-3 files that would give advisors the context they need to give specific, grounded advice instead of generic takes.
-
-
-**B. Frame the question.** Take the user's raw question AND the enriched context and reframe it as a clear, neutral prompt that all five advisors will receive. The framed question should include:
-
-
-1. The core decision or question
-
-2. Key context from the user's message
-
-3. Key context from workspace files (business stage, audience, constraints, past results, relevant numbers)
-
-4. What's at stake (why this decision matters)
-
-
-Don't add your own opinion. Don't steer it. But DO make sure each advisor has enough context to give a specific, grounded answer rather than generic advice.
-
-
-If the question is too vague ("council this: my business"), ask one clarifying question. Just one. Then proceed.
-
-
-Save the framed question for the transcript.
-
-
-### step 2: convene the council (backend: call-agy, unico)
-
-
-**Backend unico — modelos reais via `call-agy`.** Cada advisor e respondido por um MODELO REAL diferente via `call_agy_parallel` (`~/.claude/skills/call-agy/scripts/agy.py`) — nao por uma sub-persona do Claude conversando consigo mesma. Diversidade de opiniao de verdade, nao so de prompt sobre o mesmo modelo.
-
-**Nao ha fallback para sub-agentes Claude.** Se o `call-agy` nao estiver disponivel (skill ausente, `agy` fora do PATH, `AUTH_ERROR`, cota esgotada), pare e avise o usuario com o erro concreto, para ele trocar de conta ou corrigir o ambiente. Nunca rode o council com sub-agentes Claude: consome a cota do Claude Code, e quando ela esgota derruba o proprio agente que faria a sintese.
-
-
-Cada advisor recebe:
-
-
-1. Their advisor identity and thinking style (from the descriptions above)
-
-2. The framed question
-
-3. A clear instruction: respond independently. Do not hedge. Do not try to be balanced. Lean fully into your assigned perspective. If you see a fatal flaw, say it. If you see massive upside, say it. Your job is to represent your angle as strongly as possible. The synthesis comes later.
-
-
-#### backend call-agy: mapeamento de modelo por advisor
-
-
-Com 5 personas e so 3 familias de modelo independentes disponiveis (o `Claude Opus 4.6 (Thinking)` fica reservado pro chairman no step 4 — nao reuse como advisor), rotacione:
-
-
-| Advisor | Modelo (`--model`) |
+| status | O que fazer |
 |---|---|
-| The Contrarian | `Gemini 3.1 Pro (High)` |
-| The First Principles Thinker | `Claude Sonnet 4.6 (Thinking)` |
-| The Expansionist | `Gemini 3.8 Flash (High)` |
-| The Outsider | `Gemini 3.1 Pro (High)` |
-| The Executor | `Gemini 3.8 Flash (High)` |
+| `OK` | passo 3 |
+| `COTA` | **pare e avise o usuario para trocar a conta**; mostre as `respostas` que ja vieram; nao espere a cota voltar nem troque por subagente |
+| `POUCAS_RESPOSTAS` | diga quem nao respondeu (`avisos`) e ofereca rodar de novo; nao feche voce como se fosse o conselho |
+| `SINTESE_FALHOU` | mostre os pareceres e ofereca repetir so o fechamento |
 
+## Passo 2-S - modo sigiloso
 
-> **Nunca use `GPT-OSS 120B`** — modelo desatualizado, fora de uso neste council (ver `call-agy/SKILL.md`, secao "Catalogo de modelos").
-> **Gemini sempre no tier `(High)`** — nunca `(Low)`/`(Medium)` num council; esses tiers sao so para
-> probe/triagem no `call-agy`, nao para a opiniao de um conselheiro. Repetir a familia Gemini em mais
-> de um advisor e aceitavel — a PERSONA (o prompt) e o que diferencia o angulo; o que nao pode se
-> repetir e o par (modelo + prompt identico).
+Nada vai ao agy. Gere os prompts com o mesmo texto do motor:
 
-
-```python
-import sys
-sys.path.insert(0, r"<CAMINHO>\call-agy\scripts")
-from agy import call_agy_parallel
-
-ADVISORS = [
-    ("The Contrarian", contrarian_style, "Gemini 3.1 Pro (High)"),
-    ("The First Principles Thinker", first_principles_style, "Claude Sonnet 4.6 (Thinking)"),
-    ("The Expansionist", expansionist_style, "Gemini 3.8 Flash (High)"),
-    ("The Outsider", outsider_style, "Gemini 3.1 Pro (High)"),
-    ("The Executor", executor_style, "Gemini 3.8 Flash (High)"),
-]
-jobs = [{"prompt": build_advisor_prompt(name, style, framed_question), "model": model}
-        for name, style, model in ADVISORS]
-results = call_agy_parallel(jobs, max_concurrency=5, retries=2, timeout=180)
+```bash
+python ~/.claude/skills/llm-council/scripts/council.py --prompts --modo leve --pergunta decisao.txt --contexto resumo.txt
 ```
 
+Lance **3 subagentes em paralelo** (ferramenta Agent, `model: sonnet`), um prompt cada, e acrescente
+no inicio: "Nao leia arquivos nem use ferramentas: responda so com o texto abaixo." O fechamento e
+seu, no formato do passo 4. Avise que sao tres visoes do mesmo modelo e que gasta cota do Claude Code.
 
-Each advisor should produce a response of 150-300 words. Long enough to be substantive, short enough to be scannable.
+## Passo 3 - conferencia (obrigatoria)
 
+Quem responde ao usuario e voce, nao o fechamento.
 
-**Advisor prompt template:**
+1. Pegue a secao "Premissas a conferir".
+2. Confira cada uma que der (arquivo, medida, teste, documentacao): **conferi** / **nao conferi** /
+   **falsa**.
+3. Premissa central falsa: diga isso primeiro e **nao endosse** a resposta.
+4. Pareceres do mesmo modelo valem como um so.
 
+## Passo 4 - entregar no chat
+
+Entregue como mensagem normal da conversa, em portugues do Brasil. Cabecalho com `chamadas` e `baldes` do JSON;
+depois as secoes do fechamento (resposta curta, argumentos que se sustentam, riscos e lacunas,
+desacordo que continua, proximo passo) e, no fim, a conferencia:
 
 ```
+Conselho: <tema> (modo leve · 4 pedidos · gemini 2 / claude 2)
+...
+Conferencia
+- conferi: ...
+- alegado, nao conferi: ...
+```
 
-You are [Advisor Name] on an LLM Council.
-
-
-Your thinking style: [advisor description from above]
-
-
-A user has brought this question to the council:
-
+Avisos do script (cadeira sem resposta, reserva Sonnet) em uma linha no fim. Registro em arquivo,
+apenas a pedido: na pasta de trabalho dele, com o caminho completo.
 
 ---
 
-[framed question]
-
----
-
-
-Respond from your perspective. Be direct and specific. Don't hedge or try to be balanced. Lean fully into your assigned angle. The other advisors will cover the angles you're not covering.
-
-
-Keep your response between 150-300 words. No preamble. Go straight into your analysis.
-
-```
-
-
-### step 3: peer review (5 reviewers in parallel)
-
-
-This is the step that makes the council more than just "ask 5 times." It's the core of Karpathy's insight.
-
-
-Collect all 5 advisor responses. Anonymize them as Response A through E (randomize which advisor maps to which letter so there's no positional bias).
-
-
-Run 5 reviewers, one for each advisor, via `call_agy_parallel`, reaproveitando o mapeamento de modelo do step 2. Each reviewer sees all 5 anonymized responses and answers three questions:
-
-
-1. Which response is the strongest and why? (pick one)
-
-2. Which response has the biggest blind spot and what is it?
-
-3. What did ALL responses miss that the council should consider?
-
-
-**Reviewer prompt template:**
-
-
-```
-
-You are reviewing the outputs of an LLM Council. Five advisors independently answered this question:
-
-
----
-
-[framed question]
-
----
-
-
-Here are their anonymized responses:
-
-
-**Response A:**
-
-[response]
-
-
-**Response B:**
-
-[response]
-
-
-**Response C:**
-
-[response]
-
-
-**Response D:**
-
-[response]
-
-
-**Response E:**
-
-[response]
-
-
-Answer these three questions. Be specific. Reference responses by letter.
-
-
-1. Which response is the strongest? Why?
-
-2. Which response has the biggest blind spot? What is it missing?
-
-3. What did ALL five responses miss that the council should consider?
-
-
-Keep your review under 200 words. Be direct.
-
-```
-
-
-### step 4: chairman synthesis
-
-
-This is the final step. One agent gets everything: the original question, all 5 advisor responses (now de-anonymized so you can see which advisor said what), and all 5 peer reviews.
-
-
-Chame `call_agy` com `model="Claude Opus 4.6 (Thinking)"` (`SYNTH_MODEL`) — nunca reaproveite um modelo ja usado como advisor.
-
-
-The chairman's job is to produce the final council output. It follows this structure:
-
-
-**COUNCIL VERDICT**
-
-
-1. **Where the council agrees** — the points that multiple advisors converged on independently. These are high-confidence signals.
-
-
-2. **Where the council clashes** — the genuine disagreements. Don't smooth these over. Present both sides and explain why reasonable advisors disagree.
-
-
-3. **Blind spots the council caught** — things that only emerged through the peer review round. Things individual advisors missed that other advisors flagged.
-
-
-4. **The recommendation** — a clear, actionable recommendation. Not "it depends." Not "consider both sides." A real answer. The chairman can disagree with the majority if the reasoning supports it.
-
-
-5. **The one thing you should do first** — a single concrete next step. Not a list of 10 things. One thing.
-
-
-**Chairman prompt template:**
-
-
-```
-
-You are the Chairman of an LLM Council. Your job is to synthesize the work of 5 advisors and their peer reviews into a final verdict.
-
-
-The question brought to the council:
-
----
-
-[framed question]
-
----
-
-
-ADVISOR RESPONSES:
-
-
-**The Contrarian:**
-
-[response]
-
-
-**The First Principles Thinker:**
-
-[response]
-
-
-**The Expansionist:**
-
-[response]
-
-
-**The Outsider:**
-
-[response]
-
-
-**The Executor:**
-
-[response]
-
-
-PEER REVIEWS:
-
-[all 5 peer reviews]
-
-
-Produce the council verdict using this exact structure:
-
-
-## Where the Council Agrees
-
-[Points multiple advisors converged on independently. These are high-confidence signals.]
-
-
-## Where the Council Clashes
-
-[Genuine disagreements. Present both sides. Explain why reasonable advisors disagree.]
-
-
-## Blind Spots the Council Caught
-
-[Things that only emerged through peer review. Things individual advisors missed that others flagged.]
-
-
-## The Recommendation
-
-[A clear, direct recommendation. Not "it depends." A real answer with reasoning.]
-
-
-## The One Thing to Do First
-
-[A single concrete next step. Not a list. One thing.]
-
-
-Be direct. Don't hedge. The whole point of the council is to give the user clarity they couldn't get from a single perspective.
-
-```
-
-
-### step 5: present the verdict in chat
-
-
-After the chairman synthesis is complete, present the full verdict directly in chat using markdown. Do NOT generate an HTML report or any files. The user reads it in the conversation.
-
-Format the output as:
-
-```
-## Council Verdict: {short topic}
-
-### Where the Council Agrees
-{content}
-
-### Where the Council Clashes
-{content}
-
-### Blind Spots the Council Caught
-{content}
-
-### The Recommendation
-{content}
-
-### The One Thing to Do First
-{content}
-```
-
-Keep it scannable. Use bullet points. Include the before/after examples where relevant.
-
-
-### step 6: save the transcript (optional)
-
-
-Only save a transcript if the user asks for it or if the question is significant enough to reference later. If saving, write to `council-transcript-[timestamp].md` in the project's `active/` directory.
-
-
----
-
-
-## example: counciling a product decision
-
-
-**User:** "Council this: I'm thinking of building a $297 course on Claude Code for beginners. My audience is mostly non-technical solopreneurs. Is this the right move?"
-
-
-**The Contrarian:** "The market is flooded with Claude courses right now. At $297, you're competing with free YouTube content. Your audience is non-technical, which means high support burden and refund risk. The people who would pay $297 are likely already past beginner level..."
-
-
-**The First Principles Thinker:** "What are you actually trying to achieve? If it's revenue, a course is one of the slowest paths. If it's authority, a free resource might do more. If it's building a customer base for higher-ticket offers, the price point and audience might be mismatched..."
-
-
-**The Expansionist:** "Beginner Claude for solopreneurs is a massive underserved market. Everyone's teaching advanced stuff. If you nail the beginner angle, you own the entry point to this entire space. The $297 might be low. What if this became a $997 program with community access..."
-
-
-**The Outsider:** "I don't know what Claude Code is. If I saw '$297 course on Claude Code for beginners,' I wouldn't know if this is for me. The name means nothing to someone outside your world. Your landing page needs to sell the outcome, not the tool..."
-
-
-**The Executor:** "A full course takes 4-8 weeks to produce properly. Before building anything, run a live workshop at $97 to 50 people. You validate demand, generate testimonials, and create the raw material for the course. If 50 people don't buy the workshop, 500 won't buy the course..."
-
-
-**Chairman's Verdict:**
-
-
-*Where the council agrees:* The beginner solopreneur angle has real demand, but the current framing (Claude Code course) is too tool-specific and won't resonate with non-technical buyers.
-
-
-*Where the council clashes:* Price. The Contrarian says $297 is too high given competition. The Expansionist says it's too low for the value. The resolution likely depends on how much support and community access is bundled.
-
-
-*Blind spots caught:* The Outsider's point that "Claude Code" means nothing to the target buyer is the single most important insight. Every advisor except the Outsider assumed the audience already knows what this is.
-
-
-*Recommendation:* Don't build the course yet. Validate with a lower-commitment offer first. But reframe entirely: sell the outcome (automate your business, get 10 hours back per week), not the tool.
-
-
-*One thing to do first:* Run a $97 live workshop called "How to automate your first business task with AI" to 50 people. Don't mention Claude Code in the title.
-
-
----
-
-
-## important notes
-
-
-- **Always spawn all 5 advisors in parallel.** Sequential spawning wastes time and lets earlier responses bleed into later ones.
-
-- **So o backend `call-agy` (modelos reais).** Sem `call-agy` funcionando, pare e avise o usuario; nunca substitua por sub-agentes Claude. Modelos reais divergem de verdade; personas sobre o mesmo modelo divergem menos.
-
-- **Nunca use `GPT-OSS 120B`** como advisor ou chairman — modelo desatualizado (ver `call-agy/SKILL.md`).
-
-- **Gemini sempre no tier `(High)`** — `(Low)`/`(Medium)` sao so para probe/triagem, nunca para a opiniao de um conselheiro.
-
-- **Advisor falhou sem causa clara (`status: ERROR`/`TIMEOUT` no `CallResult`)?** Antes de descartar esse advisor, veja `call-agy/references/environment.md` — tem o caminho dos logs do `agy` (`~/.gemini/antigravity-cli/log/cli-*.log`) pra diagnosticar auth/rede/sandbox quando `status`/`error` sozinhos nao bastam.
-
-- **Always anonymize for peer review.** If reviewers know which advisor said what, they'll defer to certain thinking styles instead of evaluating on merit.
-
-- **The chairman can disagree with the majority.** If 4 out of 5 advisors say "do it" but the reasoning of the 1 dissenter is strongest, the chairman should side with the dissenter and explain why.
-
-- **Don't council trivial questions.** If the user asks something with one right answer, just answer it. The council is for genuine uncertainty where multiple perspectives add value.
-
-- **The visual report matters.** Most users will scan the report, not read the full transcript. Make the HTML output clean and scannable.
+## Manutencao
+
+- IDs em `scripts/council.py` (`PRO`, `SONNET`, `FLASH`); fechamento = `SYNTH_MODEL` da call-agy.
+  Revise quando a call-agy revisar o catalogo.
+- Testes puros (agy simulado, sem cota): `python tests/test_council.py`.
