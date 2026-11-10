@@ -32,6 +32,13 @@ do agy esta no fim, avise o custo antes.
 | **completo** | o usuario pediu, ou a decisao e cara de desfazer | 5 + 3 revisores + fechamento = 9 | ~360 mil tokens; 3 no balde Claude |
 | **sigiloso** | a decisao envolve dado sigiloso (processo, investigacao, dado pessoal, extrato, credencial) | 3 subagentes do Claude | cota do Claude Code; nada vai ao agy |
 
+**Debate** (`--debate`, soma a leve ou completo): segunda rodada em que cada conselheiro, com a mesma
+lente e o mesmo modelo, le os outros pareceres por letra, rebate o mais fragil de cada um e fecha com
+"Posicao final". O fechamento diz quem mudou de posicao e por qual argumento. Use quando o usuario
+pedir debate, ou quando os pareceres da primeira rodada brigarem sem que se veja quem tem razao.
+Custo: +3 pedidos no leve (7 no total, 3 no balde Claude), +5 no completo (14, 4 no balde Claude);
+tokens: estimativa de ~1,7x o modo base, nao medida. Nao vale no sigiloso (as visoes sao do mesmo modelo).
+
 Antes de rodar, diga em uma linha: modo, pedidos e balde. Retentativas somam tempo (ate 4 por
 pedido, 300 s cada); o script mostra o progresso de cada fase.
 
@@ -69,6 +76,9 @@ Grave a decisao e o resumo em `.txt` na pasta temporaria da sessao e rode:
 ```bash
 python ~/.claude/skills/llm-council/scripts/council.py --modo leve --pergunta decisao.txt --contexto resumo.txt
 ```
+
+Com debate: acrescente `--debate`. Cada item de `respostas` ganha `replica` (vazia se aquela cadeira
+falhou na segunda rodada; o aviso diz qual).
 
 O script usa pasta de trabalho vazia (`~/.agy-council-cwd`), sorteia as letras, corta pareceres
 longos e trata a cota: **Gemini esgotado** -> as cadeiras e revisores Gemini passam ao Claude Sonnet

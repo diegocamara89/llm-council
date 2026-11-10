@@ -32,10 +32,10 @@ def falso(por_modelo: dict, chamadas: list, fase_revisor=None):
     return fn
 
 
-def rodar(modo, por_modelo=None, contexto="CTX", fase_revisor=None, pergunta="Devo fazer X?"):
+def rodar(modo, por_modelo=None, contexto="CTX", fase_revisor=None, pergunta="Devo fazer X?", debate=False):
     chamadas: list = []
     council.call_agy_parallel = falso(por_modelo or {}, chamadas, fase_revisor)
-    return council.rodar_council(pergunta, contexto, modo, seed=1), chamadas
+    return council.rodar_council(pergunta, contexto, modo, seed=1, debate=debate), chamadas
 
 
 def main() -> int:
@@ -81,6 +81,48 @@ def main() -> int:
         out, _ = rodar("leve", {council.SYNTH_MODEL: ("EMPTY", "")})
         check("presidente vazio vira SINTESE_FALHOU", out["status"] == "SINTESE_FALHOU" and not out["veredito"])
 
+        print("[debate]")
+        out, ch = rodar("leve", debate=True)
+        check("leve + debate: 3 + 3 replicas + presidente = 7 chamadas", out["status"] == "OK" and out["chamadas"] == 7, str(out["chamadas"]))
+        rodada2 = ch[3:6]
+        check("replica usa o mesmo modelo da 1a rodada", [j["model"] for j in rodada2] == [r["modelo"] for r in out["respostas"]])
+        check("replicante ve o proprio parecer e os outros por letra",
+              all("SEU PARECER NA PRIMEIRA RODADA ([" in j["prompt"] and j["prompt"].count("\n[") >= 2 for j in rodada2))
+        check("toda resposta ganha replica", all(r["replica"] for r in out["respostas"]))
+        check("presidente recebe a segunda rodada e a instrucao de mudanca", "segunda rodada]" in ch[-1]["prompt"] and "mudou de posicao" in ch[-1]["prompt"])
+        out, ch = rodar("leve")
+        check("sem debate nada muda: 4 chamadas e sem replica", out["chamadas"] == 4 and "replica" not in out["respostas"][0])
+        out, ch = rodar("completo", debate=True)
+        check("completo + debate: 5 + 5 + 3 + 1 = 14 chamadas", out["chamadas"] == 14, str(out["chamadas"]))
+        check("revisor do completo ve a segunda rodada", "segunda rodada]" in ch[10]["prompt"])
+        estranho2 = [j for j in ch[5:10] if "quem chega agora" in j["prompt"]][0]
+        check("estranho continua sem contexto na replica", "CTX" not in estranho2["prompt"])
+        longo = {m: ("OK", "x" * 9000) for m in (council.PRO, council.SONNET, council.FLASH)}
+        out, ch = rodar("completo", longo, contexto="c" * 1000, pergunta="p" * 2900, debate=True)
+        check("completo + debate com textos longos: todo prompt abaixo do teto",
+              out["status"] == "OK" and max(len(j["prompt"]) for j in ch) < council.TETO_PROMPT, str(max(len(j["prompt"]) for j in ch)))
+        # Replica falha so na 2a rodada: o falso decide pelo texto do prompt.
+        chamadas: list = []
+        def fn(jobs, **kw):
+            res = []
+            for j in jobs:
+                chamadas.append(j)
+                falha = "Segunda rodada" in j["prompt"] and j["model"] == council.FLASH
+                res.append(CallResult(not falha, "" if falha else "r", j["model"], "ERROR" if falha else "OK", None, 1.0))
+            return res
+        council.call_agy_parallel = fn
+        out = council.rodar_council("Devo X?", "", "leve", seed=1, debate=True)
+        check("replica falhou: segue, avisa e fica o parecer original",
+              out["status"] == "OK" and any("sem segunda rodada" in a for a in out["avisos"]), f"{out['status']} {out['avisos']}")
+        def fn_cota(jobs, **kw):
+            return [CallResult(False, "", j["model"], "QUOTA_EXHAUSTED", None, 1.0) if "Segunda rodada" in j["prompt"]
+                    else CallResult(True, "r", j["model"], "OK", None, 1.0) for j in jobs]
+        council.call_agy_parallel = fn_cota
+        out = council.rodar_council("Devo X?", "", "leve", seed=1, debate=True)
+        check("cota acabou no debate: COTA e respostas preservadas", out["status"] == "COTA" and len(out["respostas"]) == 3, out["status"])
+        out, ch = rodar("leve", {council.PRO: ("QUOTA_EXHAUSTED", "")}, debate=True)
+        check("cadeira que foi para a reserva replica na reserva", out["status"] == "OK" and all(j["model"] != council.PRO for j in ch if "Segunda rodada" in j["prompt"]), str(out["avisos"]))
+
         print("[tamanho e entrada]")
         longo = {m: ("OK", "x" * 9000) for m in (council.PRO, council.SONNET, council.FLASH)}
         out, ch = rodar("completo", longo, contexto="c" * 1000, pergunta="p" * 2900)
@@ -102,6 +144,8 @@ def main() -> int:
             check("--prompts leva o resumo de contexto (modo sigiloso)", rc == 0 and "RESUMO" in buf.getvalue())
             q.write_text("z" * 5000, encoding="utf-8")
             check("--prompts tambem valida o tamanho", council.main(["--prompts", "--pergunta", str(q)]) == 2)
+            q.write_text("Devo X?", encoding="utf-8")
+            check("--prompts com --debate e recusado", council.main(["--prompts", "--debate", "--pergunta", str(q)]) == 2)
         check("pasta de trabalho do agy nao e a pasta pessoal", council.CWD != Path.home())
     finally:
         council.call_agy_parallel = orig

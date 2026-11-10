@@ -4,11 +4,12 @@ council.py - motor do /llm-council sobre a skill call-agy (agy = Antigravity CLI
 Modos:
     leve     (padrao) 3 conselheiros, um por modelo, sem revisao cruzada; presidente Opus.
     completo 5 conselheiros + 3 revisores anonimos (um por modelo); presidente Opus.
+    --debate (em qualquer modo) segunda rodada: cada conselheiro le os outros pareceres e rebate.
 O modo sigiloso (assunto que nao pode sair do Claude) NAO passa por aqui: roda com subagentes do
 Claude usando os prompts de --prompts (ver SKILL.md).
 
 Uso:
-    python council.py --modo leve --pergunta pergunta.txt [--contexto contexto.txt]
+    python council.py --modo leve [--debate] --pergunta pergunta.txt [--contexto contexto.txt]
     python council.py --prompts --modo leve --pergunta pergunta.txt [--contexto contexto.txt]
 Saida: JSON no stdout; progresso por fase no stderr.
 Codigo: 0 ok, 1 o conselho nao fechou, 2 entrada invalida, 3 cota do agy esgotada.
@@ -29,6 +30,8 @@ CWD = Path.home() / ".agy-council-cwd"
 LIMITE_PERGUNTA = 4000    # pergunta + contexto
 CORTE_RESPOSTA = 3000     # cada resposta, ao entrar no prompt de revisor/presidente
 CORTE_REVISAO = 2000
+CORTE_DEBATE = 1500       # com --debate, cada parecer da 1a rodada cabe em menos (a replica vem junto)
+CORTE_REPLICA = 2000
 TETO_PROMPT = 30000       # o prompt vai por argv (limite do Windows ~32767)
 
 PRO, SONNET, FLASH = "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Gemini 3.8 Flash (High)"
@@ -72,7 +75,27 @@ def prompt_conselheiro(papel: str, pergunta: str, contexto: str) -> str:
 
 
 def _anonimo(respostas: list[dict]) -> str:
-    return "\n\n".join(f"[{r['letra']}]\n{_corta(r['texto'], CORTE_RESPOSTA)}" for r in respostas)
+    # Com debate, a replica de cada letra vai junto e o parecer original encolhe para caber no teto.
+    corte = CORTE_DEBATE if any(r.get("replica") for r in respostas) else CORTE_RESPOSTA
+    return "\n\n".join(
+        f"[{r['letra']}]\n{_corta(r['texto'], corte)}"
+        + (f"\n\n[{r['letra']}, segunda rodada]\n{_corta(r['replica'], CORTE_REPLICA)}" if r.get("replica") else "")
+        for r in respostas)
+
+
+def prompt_debate(papel: str, pergunta: str, contexto: str, propria: dict, respostas: list[dict]) -> str:
+    lente, _ = PAPEIS[papel]
+    corpo = pergunta if papel == "estranho" or not contexto else f"{pergunta}\n\nCONTEXTO:\n{contexto}"
+    outras = "\n\n".join(f"[{r['letra']}]\n{_corta(r['texto'], CORTE_RESPOSTA)}" for r in respostas if r is not propria)
+    return (
+        f"Segunda rodada de uma analise em grupo. {lente}\n"
+        "Nao leia arquivos nem rode comandos: use so o texto abaixo. Em portugues do Brasil, no maximo 250 "
+        "palavras: (1) rebata a afirmacao mais fragil de cada outro parecer, citando a letra; (2) diga o que "
+        "algum deles trouxe que muda a sua posicao, ou declare que nada mudou; (3) termine com 'Posicao final:' "
+        "em uma frase. Mude de ideia so diante de argumento ou dado novo; nao ceda a tom nem a maioria.\n\n"
+        f"DECISAO EM ANALISE:\n{corpo}\n\nSEU PARECER NA PRIMEIRA RODADA ([{propria['letra']}]):\n"
+        f"{_corta(propria['texto'], CORTE_RESPOSTA)}\n\nPARECERES DOS OUTROS:\n{outras}"
+    )
 
 
 def prompt_revisor(pergunta: str, respostas: list[dict]) -> str:
@@ -91,6 +114,7 @@ def prompt_presidente(pergunta: str, contexto: str, respostas: list[dict], revis
     for r in respostas:
         grupos.setdefault(r["modelo"], []).append(r["letra"])
     mesmo = "; ".join(" e ".join(v) for v in grupos.values() if len(v) > 1)
+    debate = any(r.get("replica") for r in respostas)
     partes = [
         "Voce fecha a analise de um grupo. Escreva em portugues do Brasil nesta ordem: "
         "### Resposta curta (uma frase) / ### Argumentos que se sustentam / ### Riscos e lacunas / "
@@ -99,6 +123,9 @@ def prompt_presidente(pergunta: str, contexto: str, respostas: list[dict], revis
         "Pareceres do MESMO modelo valem como um so" + (f" ({mesmo})." if mesmo else "."),
         "Posicao firme nao e prova: pese pelos argumentos, nao pelo tom.",
     ]
+    if debate:
+        partes.append("Houve segunda rodada: cada analista leu os outros e rebateu. Diga quem mudou de posicao e "
+                      "por qual argumento; mudanca sem argumento novo nao conta como convergencia.")
     if not revisoes:
         partes.append("Nao houve revisao cruzada: cite voce o fator capaz de mudar a decisao que ficou fora de todos os pareceres.")
     if faltaram:
@@ -141,19 +168,21 @@ def _rodar(fase: str, jobs: list[dict], rotulos: list[str], out: dict):
     return res, jobs
 
 
-def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: int | None = None) -> dict:
-    """Devolve {status, modo, veredito, respostas, revisoes, chamadas, baldes, avisos}.
+def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: int | None = None,
+                  debate: bool = False) -> dict:
+    """Devolve {status, modo, debate, veredito, respostas, revisoes, chamadas, baldes, avisos}.
 
     status: OK | COTA (cota do agy esgotada, inclusive a do Claude) | POUCAS_RESPOSTAS | SINTESE_FALHOU.
     `respostas` volta preenchida mesmo quando o conselho nao fecha (o que ja foi pago nao se perde).
     `chamadas` conta pedidos ao agy, sem as retentativas internas.
+    Com `debate`, cada resposta ganha `replica` (segunda rodada; "" se aquela cadeira falhou).
     """
     if modo not in MODOS:
         raise ValueError(f"modo invalido: {modo!r}")
     if len(pergunta) + len(contexto) > LIMITE_PERGUNTA:
         raise ValueError(f"pergunta + contexto passam de {LIMITE_PERGUNTA} caracteres: resuma antes")
     papeis = MODOS[modo]
-    out = {"status": "OK", "modo": modo, "veredito": "", "respostas": [], "revisoes": [],
+    out = {"status": "OK", "modo": modo, "debate": debate, "veredito": "", "respostas": [], "revisoes": [],
            "chamadas": 0, "baldes": {"gemini": 0, "claude": 0}, "avisos": []}
 
     jobs = [{"prompt": prompt_conselheiro(p, pergunta, contexto), "model": PAPEIS[p][1]} for p in papeis]
@@ -175,6 +204,23 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
         out.update(status="POUCAS_RESPOSTAS")
         out["avisos"].append("nao responderam: " + ", ".join(faltaram))
         return out
+
+    if debate:
+        # Mesma lente e mesmo modelo da 1a rodada (o modelo ja trocado pela reserva, se foi o caso).
+        djobs = [{"prompt": prompt_debate(r["papel"], pergunta, contexto, r, respostas), "model": r["modelo"]}
+                 for r in respostas]
+        dv, djobs = _rodar("debate", djobs, [r["letra"] for r in respostas], out)
+        for r, j, d in zip(respostas, djobs, dv):
+            r["replica"] = d.text.strip() if d.ok else ""
+            if j["model"] != r["modelo"]:
+                r["modelo_replica"] = j["model"]
+        if any(d.status == "QUOTA_EXHAUSTED" for d in dv):
+            out.update(status="COTA")
+            out["avisos"].append("cota do agy esgotada no debate (Claude inclusive): trocar a conta")
+            return out
+        sem = [f"{r['letra']} ({d.status})" for r, d in zip(respostas, dv) if not r["replica"]]
+        if sem:
+            out["avisos"].append("sem segunda rodada (fica so o parecer original): " + ", ".join(sem))
 
     if modo == "completo":
         rjobs = [{"prompt": prompt_revisor(pergunta, respostas), "model": m} for m in REVISORES]
@@ -209,17 +255,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pergunta", required=True, help="arquivo .txt com a pergunta enquadrada")
     ap.add_argument("--contexto", help="arquivo .txt com o resumo de contexto escrito pelo Claude")
     ap.add_argument("--prompts", action="store_true", help="so imprime os prompts (modo sigiloso)")
+    ap.add_argument("--debate", action="store_true", help="segunda rodada: cada conselheiro rebate os outros")
     a = ap.parse_args(argv)
     try:
         pergunta = Path(a.pergunta).read_text(encoding="utf-8").strip()
         contexto = Path(a.contexto).read_text(encoding="utf-8").strip() if a.contexto else ""
         if len(pergunta) + len(contexto) > LIMITE_PERGUNTA:
             raise ValueError(f"pergunta + contexto passam de {LIMITE_PERGUNTA} caracteres: resuma antes")
+        if a.prompts and a.debate:
+            raise ValueError("--debate nao vale com --prompts: no modo sigiloso as visoes sao do mesmo modelo")
         if a.prompts:
             print(json.dumps({p: prompt_conselheiro(p, pergunta, contexto) for p in MODOS[a.modo]},
                              ensure_ascii=False, indent=2))
             return 0
-        out = rodar_council(pergunta, contexto, a.modo)
+        out = rodar_council(pergunta, contexto, a.modo, debate=a.debate)
     except (OSError, ValueError) as exc:
         print(f"ERRO: {exc}", file=sys.stderr)
         return 2

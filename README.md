@@ -6,6 +6,7 @@ confere antes de entregar.
 
 - **Modo leve** (padrao): 3 conselheiros, um por modelo, e um fechamento — 4 pedidos ao agy.
 - **Modo completo**: 5 conselheiros, 3 revisores anonimos e o fechamento — 9 pedidos.
+- **Debate** (`--debate`, em qualquer modo): segunda rodada em que cada conselheiro rebate os outros.
 - **Modo sigiloso**: para assunto que nao pode sair do Claude; roda com subagentes dele.
 
 ## Requisitos
