@@ -1,19 +1,20 @@
 """
-council.py - motor do /llm-council sobre dois executores: agy (Antigravity CLI, modelos Gemini 4)
-e vibe (Mistral Vibe CLI, modelos Mistral e GLM). Modelo do vibe aparece como "vibe:<apelido>".
+council.py - motor do /llm-council sobre dois executores: Codex (modelo gpt-6.1-sol, familia OpenAI) e vibe
+(Mistral Vibe CLI, modelos Mistral e GLM). Modelo do Codex aparece como "codex:<modelo>"; o do vibe, "vibe:<apelido>".
+O agy (Gemini) saiu em 18/11/2026, quando a assinatura do Gemini foi cancelada.
 
 Modos:
-    leve     (padrao) 3 conselheiros sem revisao cruzada; presidente Mistral Large 4.
-    completo 5 conselheiros + 3 revisores anonimos; presidente Mistral Large 4.
+    leve     (padrao) 3 conselheiros sem revisao cruzada; presidente GLM 5.3.
+    completo 5 conselheiros + 3 revisores anonimos; presidente GLM 5.3.
     --debate (em qualquer modo) segunda rodada: cada conselheiro le os outros pareceres e rebate.
-Se um executor cai (cota, erro, vazio, timeout), a cadeira e refeita no outro (agy -> vibe GLM 5.3;
-vibe -> agy Hydrogen High). Sem nenhum dos dois, --prompts gera os prompts para subagentes do Claude.
+Se um executor cai (cota, erro, vazio, timeout), a cadeira e refeita no outro (Codex -> vibe GLM 5.3;
+vibe -> Codex). Sem nenhum dos dois, --prompts gera os prompts para subagentes do Claude.
 
 Uso:
     python council.py --modo leve [--debate] --pergunta pergunta.txt [--contexto contexto.txt]
     python council.py --prompts --modo leve --pergunta pergunta.txt [--contexto contexto.txt]
 Saida: JSON no stdout; progresso por fase no stderr.
-Codigo: 0 ok, 1 o conselho nao fechou, 2 entrada invalida, 3 cota esgotada (agy e vibe).
+Codigo: 0 ok, 1 o conselho nao fechou, 2 entrada invalida, 3 cota esgotada (Codex e vibe).
 """
 from __future__ import annotations
 
@@ -27,13 +28,24 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / ".claude" / "skills" / "call-agy" / "scripts"))
-from agy import CallResult, call_agy_parallel  # noqa: E402
 
-# Pasta vazia de trabalho do agy: sem ela ele comecaria na pasta pessoal do usuario.
-CWD = Path.home() / ".agy-council-cwd"
+
+@dataclass
+class CallResult:
+    """Resultado de uma chamada a um executor. status: OK | EMPTY | ERROR | TIMEOUT | QUOTA_EXHAUSTED."""
+    ok: bool
+    text: str
+    model: str | None
+    status: str
+    error: str | None
+    elapsed_s: float
+
+
+# Pasta vazia de trabalho dos executores: sem ela comecariam na pasta pessoal do usuario.
+CWD = Path.home() / ".council-cwd"
 LIMITE_PERGUNTA = 4000    # pergunta + contexto
 CORTE_RESPOSTA = 3000     # cada resposta, ao entrar no prompt de revisor/presidente
 CORTE_REVISAO = 2000
@@ -41,37 +53,37 @@ CORTE_DEBATE = 1500       # com --debate, cada parecer da 1a rodada cabe em meno
 CORTE_REPLICA = 2000
 TETO_PROMPT = 30000       # o prompt vai por argv (limite do Windows ~32767)
 
-# Modelos (decisao de 17/11/2026: Claude Opus/Sonnet saem do agy; cadeiras por diversidade de familia,
-# sem nota medida de julgamento; so entra modelo com nota 1,00 ou quase nas baterias da avaliacao-vibe:
-# o Argon errou fato atual da web e o Carbon estourou 300 s no conselho: os dois ficaram de fora). Executor agy: ID literal do catalogo. Executor vibe: "vibe:<apelido>".
-HYDROGEN = "Gemini 4 Hydrogen (High)"
+# Modelos (18/11/2026, sem Gemini): cadeiras por diversidade de familia, sem nota medida de julgamento; so entra
+# modelo com nota 1,00 ou quase nas baterias da avaliacao-vibe. Executor Codex: "codex:<modelo>". Executor vibe: "vibe:<apelido>".
+CODEX = "codex:gpt-6.1-sol"
 GLM = "vibe:zai-glm-5-3"
 LARGE = "vibe:mistral-large-4"
-# executor caiu -> a cadeira vai para o outro: agy -> vibe GLM 5.3; vibe -> agy Hydrogen High.
-RESERVA = {"agy": GLM, "vibe": HYDROGEN}
-PRESIDENTES = [LARGE, GLM, HYDROGEN]   # tenta nesta ordem; so o ultimo e do agy
+# executor caiu -> a cadeira vai para o outro: Codex -> vibe GLM 5.3; vibe -> Codex.
+RESERVA = {"codex": GLM, "vibe": CODEX}
+# Presidente: GLM 5.3 primeiro (18/11/2026: o Large 4 levou 50, 163 e 283 s no fechamento; GLM mediana 44 s em busca); depois Large 4 e Codex.
+PRESIDENTES = [GLM, LARGE, CODEX]   # tenta nesta ordem; so o ultimo e do Codex
 VIBE_TIMEOUT = 300
-AGY_TIMEOUT = 240   # Hydrogen: 47-131 s em tarefas simples, 118-159 s no conselho real; passou disso, cai na reserva do vibe
-AGY_RETRIES = 1
+CODEX_TIMEOUT = 240   # Codex low: ~34 s numa pergunta simples; passou disso, cai na reserva do vibe
+CODEX_RETRIES = 1
 
 # papel -> (lente, modelo). Lentes proprias (tres delas ecoam perspectivas classicas de analise; as de
 # evidencia e alternativa sao desta skill), inspiradas no metodo de Karpathy e na skill de Ole Lehmann.
 PAPEIS: dict[str, tuple[str, str]] = {
     "auditor": ("Sua lente e o risco. Liste o que pode falhar, quanto custa se falhar e qual premissa "
-                "sustenta a proposta sem prova.", HYDROGEN),
+                "sustenta a proposta sem prova.", CODEX),
     "evidencia": ("Sua lente e a prova. Diga que dado, medicao ou teste barato decidiria a questao, e o que "
                   "hoje esta sendo afirmado sem esse dado.", GLM),
     "operador": ("Sua lente e a execucao. Diga o menor passo verificavel desta semana, o esforco e o que "
                  "o resultado desse passo provaria.", LARGE),
     "alternativa": ("Sua lente e a opcao ausente. Diga que outro caminho, fora das opcoes dadas, usaria o "
-                    "mesmo esforco com resultado melhor.", HYDROGEN),
+                    "mesmo esforco com resultado melhor.", LARGE),
     "estranho": ("Sua lente e a de quem chega agora, sem historico. Diga o que soa estranho, obscuro ou "
                  "desproporcional.", GLM),
 }
 MODOS = {"leve": ["auditor", "evidencia", "operador"],
          "completo": ["auditor", "evidencia", "operador", "alternativa", "estranho"]}
 MINIMO = {"leve": 2, "completo": 3}
-REVISORES = [HYDROGEN, GLM, LARGE]   # tres familias: Gemini, Z.ai, Mistral
+REVISORES = [CODEX, GLM, LARGE]   # tres familias: OpenAI, Z.ai, Mistral
 
 
 def _corta(texto: str, n: int) -> str:
@@ -155,7 +167,7 @@ def prompt_presidente(pergunta: str, contexto: str, respostas: list[dict], revis
 
 
 def _balde(modelo: str) -> str:
-    return "vibe" if modelo.startswith("vibe:") else "agy"
+    return "codex" if modelo.startswith("codex:") else "vibe"
 
 
 # Padrao para erro de cota/limite na saida do vibe. NAO verificado contra um limite real do vibe: se o
@@ -203,7 +215,7 @@ def _vibe_um(prompt: str, modelo: str, timeout: int) -> CallResult:
 
 def call_vibe_parallel(jobs: list[dict], max_concurrency: int = 3, retries: int = 2,
                        timeout: int = VIBE_TIMEOUT, **_kw) -> list[CallResult]:
-    """Como call_agy_parallel, para modelos "vibe:<apelido>". Retenta erro, vazio e timeout (cota nao)."""
+    """Chamadas paralelas ao vibe, para modelos "vibe:<apelido>". Retenta erro, vazio e timeout (cota nao)."""
     def um(j: dict) -> CallResult:
         r = _vibe_um(j["prompt"], j["model"], timeout)
         for _ in range(retries):
@@ -215,10 +227,55 @@ def call_vibe_parallel(jobs: list[dict], max_concurrency: int = 3, retries: int 
         return list(ex.map(um, jobs))
 
 
+_RE_COTA_CODEX = re.compile(r"usage limit|hit your usage|rate.?limit|\b429\b", re.I)
+_PREFIXO_PAINEL = re.compile(r"^\s*(?:\u2705\s*)?\*\*RESULTADO:\*\*\s*")  # o hook do Codex real acrescenta este rotulo
+
+
+def _codex_um(prompt: str, modelo: str, timeout: int) -> CallResult:
+    """Uma chamada ao Codex (`codex exec`, leitura apenas, pasta vazia). OK | EMPTY | ERROR | TIMEOUT | QUOTA_EXHAUSTED."""
+    t0 = time.time()
+    exe = shutil.which("codex")
+    if not exe:
+        return CallResult(False, "", modelo, "ERROR", "codex nao encontrado no PATH", 0.0)
+    CWD.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        saida = Path(tmp) / "saida.md"
+        argv = [exe, "exec", "--skip-git-repo-check", "-s", "read-only", "-m", modelo.split(":", 1)[1],
+                "-c", 'model_reasoning_effort="low"', "-C", str(CWD), "-o", str(saida), "-"]
+        try:
+            p = subprocess.run(argv, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout + 30)
+            rc, err = p.returncode, p.stderr
+        except subprocess.TimeoutExpired:
+            return CallResult(False, "", modelo, "TIMEOUT", None, time.time() - t0)
+        texto = saida.read_text(encoding="utf-8", errors="replace").strip() if saida.exists() else ""
+    seg = time.time() - t0
+    texto = _PREFIXO_PAINEL.sub("", texto).strip()
+    if texto and rc == 0:
+        return CallResult(True, texto, modelo, "OK", None, seg)
+    if _RE_COTA_CODEX.search(err):
+        return CallResult(False, "", modelo, "QUOTA_EXHAUSTED", err[-300:], seg)
+    return CallResult(False, "", modelo, "EMPTY" if rc == 0 else "ERROR", err[-300:], seg)
+
+
+def call_codex_parallel(jobs: list[dict], max_concurrency: int = 2, retries: int = CODEX_RETRIES,
+                        timeout: int = CODEX_TIMEOUT, **_kw) -> list[CallResult]:
+    """Como call_vibe_parallel, para modelos "codex:<modelo>". Retenta erro, vazio e timeout (cota nao)."""
+    def um(j: dict) -> CallResult:
+        r = _codex_um(j["prompt"], j["model"], timeout)
+        for _ in range(retries):
+            if r.status not in ("ERROR", "EMPTY", "TIMEOUT"):
+                break
+            r = _codex_um(j["prompt"], j["model"], timeout)
+        return r
+    with ThreadPoolExecutor(max_workers=max_concurrency) as ex:
+        return list(ex.map(um, jobs))
+
+
 def _chamar(jobs: list[dict]) -> list:
-    """Despacha cada job ao executor do seu modelo (agy e vibe em paralelo) e devolve na mesma ordem."""
+    """Despacha cada job ao executor do seu modelo (Codex e vibe em paralelo) e devolve na mesma ordem."""
     res: list = [None] * len(jobs)
-    grupos = {"agy": [i for i, j in enumerate(jobs) if _balde(j["model"]) == "agy"],
+    grupos = {"codex": [i for i, j in enumerate(jobs) if _balde(j["model"]) == "codex"],
               "vibe": [i for i, j in enumerate(jobs) if _balde(j["model"]) == "vibe"]}
 
     def roda(b: str) -> None:
@@ -226,21 +283,21 @@ def _chamar(jobs: list[dict]) -> list:
         if not idx:
             return
         sub = [jobs[i] for i in idx]
-        if b == "agy":
-            rs = call_agy_parallel(sub, max_concurrency=5, retries=AGY_RETRIES, timeout=AGY_TIMEOUT, cwd=str(CWD))
+        if b == "codex":
+            rs = call_codex_parallel(sub, max_concurrency=2, retries=CODEX_RETRIES, timeout=CODEX_TIMEOUT)
         else:
             rs = call_vibe_parallel(sub, max_concurrency=3, retries=2, timeout=VIBE_TIMEOUT)
         for i, r in zip(idx, rs):
             res[i] = r
 
     with ThreadPoolExecutor(max_workers=2) as ex:
-        list(ex.map(roda, ["agy", "vibe"]))
+        list(ex.map(roda, ["codex", "vibe"]))
     return res
 
 
 def _rodar(fase: str, jobs: list[dict], rotulos: list[str], out: dict, reserva: bool = True):
     """Roda a fase. Pedido que falhou (cota, erro, vazio, timeout) e refeito no outro executor
-    (agy -> vibe GLM 5.3; vibe -> agy Hydrogen High). Devolve (resultados, jobs)."""
+    (Codex -> vibe GLM 5.3; vibe -> Codex). Devolve (resultados, jobs)."""
     CWD.mkdir(exist_ok=True)
     for j in jobs:
         if len(j["prompt"]) > TETO_PROMPT:
@@ -270,9 +327,9 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
                   debate: bool = False) -> dict:
     """Devolve {status, modo, debate, veredito, respostas, revisoes, chamadas, baldes, avisos}.
 
-    status: OK | COTA (cota esgotada no agy E no vibe) | POUCAS_RESPOSTAS | SINTESE_FALHOU.
+    status: OK | COTA (cota esgotada no Codex E no vibe) | POUCAS_RESPOSTAS | SINTESE_FALHOU.
     `respostas` volta preenchida mesmo quando o conselho nao fecha (o que ja foi pago nao se perde).
-    `chamadas` conta pedidos ao agy e ao vibe, sem as retentativas internas (refazer na reserva conta).
+    `chamadas` conta pedidos ao Codex e ao vibe, sem as retentativas internas (refazer na reserva conta).
     Com `debate`, cada resposta ganha `replica` (segunda rodada; "" se aquela cadeira falhou).
     """
     if modo not in MODOS:
@@ -281,7 +338,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
         raise ValueError(f"pergunta + contexto passam de {LIMITE_PERGUNTA} caracteres: resuma antes")
     papeis = MODOS[modo]
     out = {"status": "OK", "modo": modo, "debate": debate, "veredito": "", "respostas": [], "revisoes": [],
-           "chamadas": 0, "baldes": {"agy": 0, "vibe": 0}, "avisos": []}
+           "chamadas": 0, "baldes": {"codex": 0, "vibe": 0}, "avisos": []}
 
     jobs = [{"prompt": prompt_conselheiro(p, pergunta, contexto), "model": PAPEIS[p][1]} for p in papeis]
     res, jobs = _rodar("conselheiros", jobs, papeis, out)
@@ -296,7 +353,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
 
     if any(r.status == "QUOTA_EXHAUSTED" for r in res):
         out.update(status="COTA")
-        out["avisos"].append("cota esgotada no agy e no vibe: trocar a conta do agy e conferir o painel do vibe")
+        out["avisos"].append("cota esgotada no Codex e no vibe: conferir o limite do Codex e o painel do vibe")
         return out
     if len(boas) < MINIMO[modo]:
         out.update(status="POUCAS_RESPOSTAS")
@@ -314,7 +371,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
                 r["modelo_replica"] = j["model"]
         if any(d.status == "QUOTA_EXHAUSTED" for d in dv):
             out.update(status="COTA")
-            out["avisos"].append("cota esgotada no agy e no vibe durante o debate: trocar a conta do agy e conferir o painel do vibe")
+            out["avisos"].append("cota esgotada no Codex e no vibe durante o debate: conferir o limite do Codex e o painel do vibe")
             return out
         sem = [f"{r['letra']} ({d.status})" for r, d in zip(respostas, dv) if not r["replica"]]
         if sem:
@@ -325,7 +382,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
         rv, rjobs = _rodar("revisao", rjobs, REVISORES, out)
         if any(r.status == "QUOTA_EXHAUSTED" for r in rv):
             out.update(status="COTA")
-            out["avisos"].append("cota esgotada no agy e no vibe na revisao: trocar a conta do agy e conferir o painel do vibe")
+            out["avisos"].append("cota esgotada no Codex e no vibe na revisao: conferir o limite do Codex e o painel do vibe")
             return out
         out["revisoes"] = [f"(revisor {j['model']}) {r.text.strip()}" for j, r in zip(rjobs, rv) if r.ok and r.text.strip()]
         falhos = [f"{j['model']} ({r.status})" for j, r in zip(rjobs, rv) if not (r.ok and r.text.strip())]
@@ -342,7 +399,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
         out["avisos"].append(f"presidente {pm}: {pres.status}")
     if pres.status == "QUOTA_EXHAUSTED":
         out.update(status="COTA")
-        out["avisos"].append("cota esgotada no presidente (toda a cadeia): trocar a conta do agy e conferir o painel do vibe")
+        out["avisos"].append("cota esgotada no presidente (toda a cadeia): conferir o limite do Codex e o painel do vibe")
     elif not (pres.ok and pres.text.strip()):
         out.update(status="SINTESE_FALHOU")
         out["avisos"].append(f"presidente: {pres.status} {pres.error or ''}".strip())
@@ -354,7 +411,7 @@ def rodar_council(pergunta: str, contexto: str = "", modo: str = "leve", seed: i
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Motor do /llm-council sobre o agy e o vibe.")
+    ap = argparse.ArgumentParser(description="Motor do /llm-council sobre o Codex e o vibe.")
     ap.add_argument("--modo", default="leve", choices=list(MODOS))
     ap.add_argument("--pergunta", required=True, help="arquivo .txt com a pergunta enquadrada")
     ap.add_argument("--contexto", help="arquivo .txt com o resumo de contexto escrito pelo Claude")

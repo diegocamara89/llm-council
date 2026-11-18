@@ -1,4 +1,4 @@
-"""Testes puros do motor do council (agy e vibe simulados; nao gastam cota). Rodar: python tests/test_council.py"""
+"""Testes puros do motor do council (Codex e vibe simulados; nao gastam cota). Rodar: python tests/test_council.py"""
 from __future__ import annotations
 
 import json
@@ -9,11 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import council  # noqa: E402
-from agy import CallResult  # noqa: E402
+CallResult = council.CallResult
 
 FALHAS: list[str] = []
-H, GLM, LARGE = council.HYDROGEN, council.GLM, council.LARGE
-TODOS = (H, GLM, LARGE)
+CODEX, GLM, LARGE = council.CODEX, council.GLM, council.LARGE
+TODOS = (CODEX, GLM, LARGE)
 
 
 def check(nome: str, cond: bool, det: str = "") -> None:
@@ -43,7 +43,7 @@ def falso(por_modelo: dict, chamadas: list, fase_revisor=None, por_prompt=None):
 
 
 def instala(fn) -> None:
-    council.call_agy_parallel = fn
+    council.call_codex_parallel = fn
     council.call_vibe_parallel = fn
 
 
@@ -55,20 +55,20 @@ def rodar(modo, por_modelo=None, contexto="CTX", fase_revisor=None, pergunta="De
 
 
 def main() -> int:
-    orig_agy, orig_vibe = council.call_agy_parallel, council.call_vibe_parallel
+    orig_agy, orig_vibe = council.call_codex_parallel, council.call_vibe_parallel
     try:
         print("[modos, chamadas e baldes]")
         out, ch = rodar("leve")
         check("leve: 3 conselheiros + presidente = 4 chamadas", out["status"] == "OK" and out["chamadas"] == 4, str(out["chamadas"]))
-        check("leve: 3 modelos de 3 familias", {j["model"] for j in ch[:3]} == {H, GLM, LARGE}, str([j["model"] for j in ch[:3]]))
-        check("leve: baldes 1 agy + 3 vibe", out["baldes"] == {"agy": 1, "vibe": 3}, str(out["baldes"]))
-        check("presidente e o primeiro da cadeia (Mistral Large 4 via vibe)", ch[-1]["model"] == council.PRESIDENTES[0] == LARGE)
+        check("leve: 3 modelos de 3 familias", {j["model"] for j in ch[:3]} == {CODEX, GLM, LARGE}, str([j["model"] for j in ch[:3]]))
+        check("leve: baldes 1 codex + 3 vibe", out["baldes"] == {"codex": 1, "vibe": 3}, str(out["baldes"]))
+        check("presidente e o primeiro da cadeia (GLM 5.3 via vibe)", ch[-1]["model"] == council.PRESIDENTES[0] == GLM)
         check("presidente pede o fator ausente quando nao ha revisao", "ficou fora de todos os pareceres" in ch[-1]["prompt"])
         check("presidente recebe o contexto", "CTX" in ch[-1]["prompt"])
         out, ch = rodar("completo")
         check("completo: 5 + 3 revisores + presidente = 9 chamadas", out["chamadas"] == 9, str(out["chamadas"]))
-        check("completo: 5 cadeiras em 3 modelos (repetem), sem Argon nem Carbon", {j["model"] for j in ch[:5]} == set(TODOS) and not hasattr(council, "ARGON") and not hasattr(council, "CARBON"))
-        check("revisores: tres familias (Gemini, Z.ai, Mistral)", {j["model"] for j in ch[5:8]} == {H, GLM, LARGE})
+        check("completo: 5 cadeiras em 3 modelos (repetem), sem Gemini", {j["model"] for j in ch[:5]} == set(TODOS) and not hasattr(council, "HYDROGEN") and not hasattr(council, "call_agy_parallel"))
+        check("revisores: tres familias (OpenAI, Z.ai, Mistral)", {j["model"] for j in ch[5:8]} == {CODEX, GLM, LARGE})
         estranho = [j for j in ch[:5] if "quem chega agora" in j["prompt"]][0]
         check("estranho nao recebe o contexto", "CTX" not in estranho["prompt"])
         check("os outros conselheiros recebem o contexto", all("CTX" in j["prompt"] for j in ch[:5] if j is not estranho))
@@ -76,29 +76,29 @@ def main() -> int:
         check("conselheiro nao deve ler arquivos", "Nao leia arquivos" in ch[0]["prompt"])
 
         print("[reserva entre executores]")
-        out, ch = rodar("leve", {H: ("QUOTA_EXHAUSTED", "")})
-        check("agy sem cota: a cadeira vai para o vibe GLM e segue",
+        out, ch = rodar("leve", {CODEX: ("QUOTA_EXHAUSTED", "")})
+        check("Codex sem cota: a cadeira vai para o vibe GLM e segue",
               out["status"] == "OK" and any("refeito em " + GLM in a for a in out["avisos"]), f"{out['status']} {out['avisos']}")
         out, ch = rodar("leve", {GLM: ("ERROR", ""), LARGE: ("QUOTA_EXHAUSTED", "")})
-        check("vibe fora: cadeiras vao para o Hydrogen e o presidente cai na cadeia ate o Hydrogen",
-              out["status"] == "OK" and any("refeito em " + H in a for a in out["avisos"]) and ch[-1]["model"] == H,
+        check("vibe fora: cadeiras vao para o Codex e o presidente cai na cadeia ate o Codex",
+              out["status"] == "OK" and any("refeito em " + CODEX in a for a in out["avisos"]) and ch[-1]["model"] == CODEX,
               f"{out['status']} {out['avisos']}")
-        out, ch = rodar("completo", {H: ("QUOTA_EXHAUSTED", "")})
-        check("completo, agy sem cota: conselheiros E revisores vao para o vibe e fecha",
+        out, ch = rodar("completo", {CODEX: ("QUOTA_EXHAUSTED", "")})
+        check("completo, Codex sem cota: conselheiros E revisores vao para o vibe e fecha",
               out["status"] == "OK" and out["veredito"], f"{out['status']} {out['avisos']}")
-        out, ch = rodar("leve", {H: ("QUOTA_EXHAUSTED", ""), GLM: ("QUOTA_EXHAUSTED", ""), LARGE: ("QUOTA_EXHAUSTED", "")})
-        check("agy e vibe sem cota: COTA", out["status"] == "COTA", out["status"])
+        out, ch = rodar("leve", {CODEX: ("QUOTA_EXHAUSTED", ""), GLM: ("QUOTA_EXHAUSTED", ""), LARGE: ("QUOTA_EXHAUSTED", "")})
+        check("Codex e vibe sem cota: COTA", out["status"] == "COTA", out["status"])
         check("COTA nao chama o presidente", all("Voce fecha a analise" not in j["prompt"] for j in ch))
-        out, ch = rodar("leve", {H: ("QUOTA_EXHAUSTED", ""), GLM: ("QUOTA_EXHAUSTED", "")})
+        out, ch = rodar("leve", {CODEX: ("QUOTA_EXHAUSTED", ""), GLM: ("QUOTA_EXHAUSTED", "")})
         check("COTA preserva as respostas ja pagas", out["status"] == "COTA" and len(out["respostas"]) == 1, str(len(out["respostas"])))
-        out, ch = rodar("leve", {H: ("ERROR", ""), GLM: ("ERROR", "")})
+        out, ch = rodar("leve", {CODEX: ("ERROR", ""), GLM: ("ERROR", "")})
         check("POUCAS_RESPOSTAS sem presidente e com a resposta que veio",
               out["status"] == "POUCAS_RESPOSTAS" and len(out["respostas"]) == 1 and all("Voce fecha a analise" not in j["prompt"] for j in ch),
               out["status"])
         out, ch = rodar("completo", por_prompt={"lente e a opcao ausente": ("ERROR", "")})
         check("cadeira falhou nos dois executores: segue e avisa o presidente",
               out["status"] == "OK" and "Nao responderam" in ch[-1]["prompt"], out["status"])
-        out, ch = rodar("completo", fase_revisor={H: ("ERROR", ""), GLM: ("EMPTY", ""), LARGE: ("TIMEOUT", "")})
+        out, ch = rodar("completo", fase_revisor={CODEX: ("ERROR", ""), GLM: ("EMPTY", ""), LARGE: ("TIMEOUT", "")})
         check("revisores falhando geram aviso (nao silencio)", any("revisores sem resposta" in a for a in out["avisos"]), str(out["avisos"]))
         out, _ = rodar("leve", por_prompt={"Voce fecha a analise": ("EMPTY", "")})
         check("presidente vazio em toda a cadeia vira SINTESE_FALHOU", out["status"] == "SINTESE_FALHOU" and not out["veredito"])
@@ -133,10 +133,10 @@ def main() -> int:
         chamadas = []
         instala(falso({}, chamadas, por_prompt={"Segunda rodada": ("QUOTA_EXHAUSTED", "")}))
         out = council.rodar_council("Devo X?", "", "leve", seed=1, debate=True)
-        check("cota acabou no debate (agy e vibe): COTA e respostas preservadas", out["status"] == "COTA" and len(out["respostas"]) == 3, out["status"])
-        out, ch = rodar("leve", {H: ("QUOTA_EXHAUSTED", "")}, debate=True)
+        check("cota acabou no debate (Codex e vibe): COTA e respostas preservadas", out["status"] == "COTA" and len(out["respostas"]) == 3, out["status"])
+        out, ch = rodar("leve", {CODEX: ("QUOTA_EXHAUSTED", "")}, debate=True)
         check("cadeira que foi para a reserva replica na reserva",
-              out["status"] == "OK" and all(j["model"] != H for j in ch if "Segunda rodada" in j["prompt"]), str(out["avisos"]))
+              out["status"] == "OK" and all(j["model"] != CODEX for j in ch if "Segunda rodada" in j["prompt"]), str(out["avisos"]))
 
         print("[tamanho e entrada]")
         longo = {m: ("OK", "x" * 9000) for m in TODOS}
@@ -157,7 +157,7 @@ def main() -> int:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = council.main(["--prompts", "--pergunta", str(q), "--contexto", str(c)])
-            check("--prompts leva o resumo de contexto (reserva sem agy e vibe)", rc == 0 and "RESUMO" in buf.getvalue())
+            check("--prompts leva o resumo de contexto (reserva sem Codex e vibe)", rc == 0 and "RESUMO" in buf.getvalue())
             q.write_text("z" * 5000, encoding="utf-8")
             check("--prompts tambem valida o tamanho", council.main(["--prompts", "--pergunta", str(q)]) == 2)
             q.write_text("Devo X?", encoding="utf-8")
@@ -211,8 +211,48 @@ def main() -> int:
             check("vibe paralelo: cota nao e retentada", r.status == "QUOTA_EXHAUSTED" and seq["n"] == 1, str(seq))
         finally:
             council._vibe_um = orig_um
+
+        print("[executor codex]")
+        council.call_codex_parallel = orig_agy      # volta ao real para testar o parser
+        orig_run2, orig_which2 = subprocess.run, council.shutil.which
+        council.shutil.which = lambda _n: "codex"
+        try:
+            def fake_codex(texto_saida, err="", rc=0):
+                def fn(argv, **kw):
+                    if texto_saida is not None:     # o codex grava a resposta no arquivo do -o
+                        Path(argv[argv.index("-o") + 1]).write_text(texto_saida, encoding="utf-8")
+                    return subprocess.CompletedProcess(argv, rc, "", err)
+                return fn
+            subprocess.run = fake_codex("\u2705 **RESULTADO:** parecer X")
+            r = council._codex_um("p", CODEX, 5)
+            check("codex: texto do -o vira OK e perde o rotulo do Painel", r.ok and r.text == "parecer X", str(r))
+            subprocess.run = fake_codex("")
+            check("codex: arquivo vazio com rc 0 vira EMPTY", council._codex_um("p", CODEX, 5).status == "EMPTY")
+            subprocess.run = fake_codex(None, "boom", 1)
+            check("codex: rc 1 sem arquivo vira ERROR", council._codex_um("p", CODEX, 5).status == "ERROR")
+            subprocess.run = fake_codex(None, "You have hit your usage limit", 1)
+            check("codex: limite de uso vira QUOTA_EXHAUSTED", council._codex_um("p", CODEX, 5).status == "QUOTA_EXHAUSTED")
+
+            def estoura2(argv, **kw):
+                raise subprocess.TimeoutExpired(argv, 1)
+            subprocess.run = estoura2
+            check("codex: passou do tempo vira TIMEOUT", council._codex_um("p", CODEX, 5).status == "TIMEOUT")
+            visto: list = []
+
+            def captura(argv, **kw):
+                visto[:] = argv
+                Path(argv[argv.index("-o") + 1]).write_text("x", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            subprocess.run = captura
+            council._codex_um("p", CODEX, 5)
+            check("codex: so leitura, modelo certo e pasta propria",
+                  visto[visto.index("-s") + 1] == "read-only" and visto[visto.index("-m") + 1] == "gpt-6.1-sol" and visto[visto.index("-C") + 1] == str(council.CWD), str(visto))
+            council.shutil.which = lambda _n: None
+            check("codex ausente vira ERROR claro", "PATH" in (council._codex_um("p", CODEX, 5).error or ""))
+        finally:
+            subprocess.run, council.shutil.which = orig_run2, orig_which2
     finally:
-        council.call_agy_parallel, council.call_vibe_parallel = orig_agy, orig_vibe
+        council.call_codex_parallel, council.call_vibe_parallel = orig_agy, orig_vibe
     print("\nFALHAS: " + ", ".join(FALHAS) if FALHAS else "\nTODOS OS TESTES PASSARAM")
     return 1 if FALHAS else 0
 
