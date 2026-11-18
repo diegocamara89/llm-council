@@ -26,3 +26,5 @@ leve e completo.
 Metodo inspirado no [LLM Council](https://github.com/karpathy/llm-council) de Andrej Karpathy e na
 skill LLM Council de [Ole Lehmann](https://x.com/itsolelehmann). Redacao e codigo deste repositorio
 sao proprios.
+
+**Modelos:** escolha pelo ambiente com `COUNCIL_CODEX_MODEL`, `COUNCIL_VIBE_MODEL_1` e `COUNCIL_VIBE_MODEL_2` (apelidos de `[[models]]` em `~/.vibe/config.toml`); os padroes sao gpt-6.1-sol, zai-glm-5-3 e mistral-large-4.

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
@@ -55,9 +56,16 @@ TETO_PROMPT = 30000       # o prompt vai por argv (limite do Windows ~32767)
 
 # Modelos (18/11/2026, sem Gemini): cadeiras por diversidade de familia, sem nota medida de julgamento; so entra
 # modelo com nota 1,00 ou quase nas baterias da avaliacao-vibe. Executor Codex: "codex:<modelo>". Executor vibe: "vibe:<apelido>".
-CODEX = "codex:gpt-6.1-sol"
-GLM = "vibe:zai-glm-5-3"
-LARGE = "vibe:mistral-large-4"
+def _modelo(variavel: str, padrao: str) -> str:
+    return (os.environ.get(variavel) or "").strip() or padrao
+
+
+# Quem usa escolhe os modelos pelo ambiente (cada conta tem planos e catalogos diferentes):
+#   COUNCIL_CODEX_MODEL  modelo do Codex (so o nome, ex.: gpt-6.1-sol)
+#   COUNCIL_VIBE_MODEL_1 e COUNCIL_VIBE_MODEL_2  apelidos do vibe, os de `[[models]]` em ~/.vibe/config.toml
+CODEX = "codex:" + _modelo("COUNCIL_CODEX_MODEL", "gpt-6.1-sol")
+GLM = "vibe:" + _modelo("COUNCIL_VIBE_MODEL_1", "zai-glm-5-3")
+LARGE = "vibe:" + _modelo("COUNCIL_VIBE_MODEL_2", "mistral-large-4")
 # executor caiu -> a cadeira vai para o outro: Codex -> vibe GLM 5.3; vibe -> Codex.
 RESERVA = {"codex": GLM, "vibe": CODEX}
 # Presidente: GLM 5.3 primeiro (18/11/2026: o Large 4 levou 50, 163 e 283 s no fechamento; GLM mediana 44 s em busca); depois Large 4 e Codex.

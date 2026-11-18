@@ -212,6 +212,12 @@ def main() -> int:
         finally:
             council._vibe_um = orig_um
 
+        print("[modelos escolhidos pelo ambiente]")
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        env = {**__import__("os").environ, "COUNCIL_CODEX_MODEL": "x-codex", "COUNCIL_VIBE_MODEL_1": "v1", "COUNCIL_VIBE_MODEL_2": "v2"}
+        out = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, r'{scripts}'); import council; "
+                              "print(council.CODEX, council.GLM, council.LARGE)"], capture_output=True, text=True, env=env).stdout.strip()
+        check("variaveis de ambiente escolhem os modelos do conselho", out == "codex:x-codex vibe:v1 vibe:v2", out)
         print("[executor codex]")
         council.call_codex_parallel = orig_agy      # volta ao real para testar o parser
         orig_run2, orig_which2 = subprocess.run, council.shutil.which

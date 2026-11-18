@@ -31,7 +31,7 @@ do Codex ou do vibe esta no fim, avise o custo antes.
 | **leve** (padrao) | a maioria das decisoes | 3 conselheiros + fechamento = 4 | 4 pedidos (1 no Codex, 3 no vibe); tempo ainda nao medido com o Codex |
 | **completo** | o usuario pediu, ou a decisao e cara de desfazer | 5 + 3 revisores + fechamento = 9 | nao medido |
 
-Dado de caso pode ir ao Codex (liberado em 18/10/2026) e ao vibe (17/11/2026), com treinamento de modelo desativado;
+O texto da decisao vai a servicos externos (Codex e vibe): mande so o que o usuario autoriza;
 credencial e senha nao. Sem Codex nem vibe, `--prompts` gera os prompts para 3 subagentes do Claude
 (`model: sonnet`, "Nao leia arquivos nem use ferramentas"): sao tres visoes do mesmo modelo e gastam cota do Claude Code.
 
@@ -57,8 +57,10 @@ medida de julgamento**: os testes da avaliacao-vibe medem acerto com gabarito, n
 
 Fechamento: GLM 5.3 (vibe); se cair, Mistral Large 4 e depois Codex. Revisores do completo: Codex, GLM 5.3 e
 Large 4 (tres familias). Revisores veem so a decisao e os pareceres; o fechamento ve tambem o contexto.
-Sem Gemini desde 18/11/2026 (assinatura cancelada; os Gemini 4 Argon e Carbon ja tinham saido por errar fato atual da web e
-por estourar 300 s num conselho real). Pedido ao Codex: limite de 240 s e 1 repeticao, depois reserva no vibe.
+Versoes anteriores usavam o agy (Gemini); ficaram de fora o Gemini 4 Argon (errou fato atual da web) e o Carbon (estourou 300 s num conselho real). Pedido ao Codex: limite de 240 s e 1 repeticao, depois reserva no vibe.
+
+**Escolha dos modelos pelo ambiente:** `COUNCIL_CODEX_MODEL`, `COUNCIL_VIBE_MODEL_1` e `COUNCIL_VIBE_MODEL_2` (apelidos do `~/.vibe/config.toml`).
+Os padroes (gpt-6.1-sol, zai-glm-5-3, mistral-large-4) foram os de melhor nota na avaliacao do autor.
 
 **Reserva entre executores:** pedido que falha (cota, erro, vazio, timeout) e refeito no outro: Codex -> vibe GLM 5.3;
 vibe -> Codex. O aviso diz quem foi refeito. Repetir modelo entre cadeiras e aceito.
